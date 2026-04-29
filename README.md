@@ -27,6 +27,7 @@ Most Homebrew works.
 - Orientation: rotate video by 90 or 270 degree
 - 240p mode: doubled resolution, mainly for CRT output
 - Flickerblend: 2 or 3 frames blending like real Lynx Screen
+- ComLynx
 
 # Refresh Rate
 Lynx uses custom refresh rates from ~50Hz up to ~79Hz.
@@ -60,5 +61,7 @@ Attention: Rewind capture will slow down your game by about 0.5% and may lead to
 Rewind capture is not compatible to "Pause when OSD is open", so pause is disabled when Rewind capture is on.
 
 # Missing features
-Comlynx/UART only implemented for Interrupts
 Custom external EEPROM not supported(not used in official games, only homebrew)
+
+# ComLynx
+Uses USER_IO[0] for the data line.

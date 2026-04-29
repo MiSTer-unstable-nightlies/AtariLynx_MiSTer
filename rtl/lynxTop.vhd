@@ -58,6 +58,10 @@ entity LynxTop is
       KeyB                       : in  std_logic;
       KeyA                       : in  std_logic;
       KeyPause                   : in  std_logic;
+
+      -- ComLynx serial
+      comm_rx                    : in  std_logic;
+      comm_tx                    : out std_logic;
    
       -- savestates
       increaseSSHeaderCount      : in  std_logic;
@@ -604,6 +608,8 @@ begin
       
       serdat_read    => serdat_read,
       serialNewTx    => serialNewTx,
+      comm_rx        => comm_rx,
+      comm_tx        => comm_tx,
       
       irq_serial     => irq_serial,
          
