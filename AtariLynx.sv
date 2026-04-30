@@ -179,7 +179,6 @@ module emu
 
 assign ADC_BUS  = 'Z;
 assign VGA_F1 = 0;
-assign USER_OUT = '1;
 
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 
@@ -438,6 +437,12 @@ wire [15:0] Lynx_AUDIO_R;
 
 wire reset = (RESET | status[0] | buttons[1] | cart_download);
 
+wire comlynx_tx;
+// ComLynx is an open-drain shared bus: USER port bit 0 is the single DATA line.
+wire comlynx_rx = USER_IN[0] & comlynx_tx;
+
+assign USER_OUT = {6'b111111, comlynx_tx};
+
 reg paused;
 always_ff @(posedge clk_sys) begin
    paused <= (syncpaused || (status[26] && OSD_STATUS)) && ~status[27]; // no pause when rewind capture is on
@@ -510,6 +515,8 @@ LynxTop LynxTop (
    .KeyB             (joystick_0[5]),
    .KeyA             (joystick_0[4]),
    .KeyPause         (joystick_0[8]),
+   .comm_rx          (comlynx_rx),
+   .comm_tx          (comlynx_tx),
    
 	// savestates
    .increaseSSHeaderCount(!status[36]),
