@@ -22,7 +22,9 @@ entity serial is
       
       serdat_read    : in  std_logic;
       serialNewTx    : in  std_logic;
-      
+      comm_rx        : in  std_logic;
+      comm_tx        : out std_logic := '1';
+
       irq_serial     : out std_logic := '0';
          
       -- savestates        
@@ -36,6 +38,24 @@ end entity;
 
 architecture arch of serial is
 
+   function frame_parity(data : std_logic_vector(7 downto 0); paren : std_logic; pareven : std_logic) return std_logic is
+      variable parity : std_logic := '0';
+   begin
+      for i in 0 to 7 loop
+         parity := parity xor data(i);
+      end loop;
+
+      if (paren = '1') then
+         if (pareven = '1') then
+            return parity;
+         else
+            return not parity;
+         end if;
+      end if;
+
+      return pareven;
+   end function;
+
    -- register
    signal Reg_SERCTL : std_logic_vector(SERCTL.upper downto SERCTL.lower) := (others => '0');
    signal Reg_SERDAT : std_logic_vector(SERDAT.upper downto SERDAT.lower) := (others => '0');
@@ -44,47 +64,67 @@ architecture arch of serial is
    signal reg_wired_or : t_reg_wired_or;   
    
    signal Reg_SERCTL_BACK    : std_logic_vector(7 downto 0);
-   
+   signal Reg_SERDAT_BACK    : std_logic_vector(7 downto 0);
+
    signal Reg_SERCTL_written : std_logic;
    signal Reg_SERDAT_written : std_logic;
    
    -- register details
    signal TXINTEN  : std_logic;  -- B7 = TXINTEN transmitter interrupt enable
-	signal RXINTEN  : std_logic;  -- B6 = RXINTEN receive interrupt enable
+   signal RXINTEN  : std_logic;  -- B6 = RXINTEN receive interrupt enable
                                  -- B5 = 0 (for future compatibility)
-	--signal PAREN    : std_logic;  -- B4 = PAREN xmit parity enable(if 0, PAREVEN is the bit sent)
-	--signal RESETERR : std_logic;  -- B3 = RESETERR reset all errors
-	--signal TXOPEN   : std_logic;  -- B2 = TXOPEN 1 open collector driver, 0 = TTL driver
-	signal TXBRK    : std_logic;  -- B1 = TXBRK send a break (for as long as the bit is set)
-	--signal PAREVEN  : std_logic;  -- B0 = PAREVEN
+   signal PAREN    : std_logic;  -- B4 = PAREN parity enable
+                                 -- B3 = RESETERR reset all errors
+   signal TXOPEN   : std_logic;  -- B2 = TXOPEN 1 open collector driver, 0 = TTL driver
+   signal TXBRK    : std_logic;  -- B1 = TXBRK send a break
+   signal PAREVEN  : std_logic;  -- B0 = PAREVEN
 
    -- internal and readback
-	signal TXRDY    : std_logic;  -- B7 = TXRDY transmitter buffer empty
-	signal RXRDY    : std_logic;  -- B6 = RXRDY receive character ready
-	signal TXEMPTY  : std_logic;  -- B5 = TXEMPTY transmitter totaiy done
-	signal PARERR   : std_logic;  -- B4 = PARERR received parity error
-	signal OVERRUN  : std_logic;  -- B3 = 0VERRUN received overrun error
-	signal FRAMERR  : std_logic;  -- B2 = FRAMERR received framing error
-	signal RXBRK    : std_logic;  -- B1 = RXBRK break recieved(24 bit periods)
-	signal PARBIT   : std_logic;  -- B0 = PARBIT 9th bit
-   
-   -- internal
-   signal uartTXCount : signed(7 downto 0) := (others => '0');
-   signal uartRXCount : signed(7 downto 0) := (others => '0'); 
-   signal uartRXBytes : signed(7 downto 0) := (others => '0');
-   
+   signal TXRDY    : std_logic;  -- B7 = TXRDY transmitter buffer empty
+   signal RXRDY    : std_logic;  -- B6 = RXRDY receive character ready
+   signal TXEMPTY  : std_logic;  -- B5 = TXEMPTY transmitter totally done
+   signal PARERR   : std_logic;  -- B4 = PARERR received parity error
+   signal OVERRUN  : std_logic;  -- B3 = OVERRUN received overrun error
+   signal FRAMERR  : std_logic;  -- B2 = FRAMERR received framing error
+   signal RXBRK    : std_logic;  -- B1 = RXBRK break received
+   signal PARBIT   : std_logic;  -- B0 = PARBIT 9th bit
+
+   signal serialNewTx_1 : std_logic := '0';
+
+   signal comm_rx_meta  : std_logic := '1';
+   signal comm_rx_sync  : std_logic := '1';
+   signal comm_rx_last  : std_logic := '1';
+
+   signal tx_hold_full  : std_logic := '0';
+   signal tx_hold_data  : std_logic_vector(7 downto 0) := (others => '1');
+   signal tx_shift_data : std_logic_vector(7 downto 0) := (others => '1');
+   signal tx_busy       : std_logic := '0';
+   signal tx_bit_count  : integer range 0 to 10 := 0;
+   signal tx_parity_bit : std_logic := '1';
+   signal tx_line       : std_logic := '1';
+
+   signal rx_data       : std_logic_vector(7 downto 0) := (others => '1');
+   signal rx_shift_data : std_logic_vector(7 downto 0) := (others => '0');
+   signal rx_busy       : std_logic := '0';
+   signal rx_bit_count  : integer range 0 to 9 := 0;
+   signal rx_wait       : unsigned(24 downto 0) := (others => '0');
+   signal rx_parity_bit : std_logic := '0';
+
+   signal baud_counter  : unsigned(23 downto 0) := (others => '0');
+   signal baud_period   : unsigned(23 downto 0) := to_unsigned(1024, 24);
+   signal break_count   : integer range 0 to 24 := 0;
+
    -- savestates
    signal SS_SERIAL          : std_logic_vector(REG_SAVESTATE_SERIAL.upper downto REG_SAVESTATE_SERIAL.lower);
    signal SS_SERIAL_BACK     : std_logic_vector(REG_SAVESTATE_SERIAL.upper downto REG_SAVESTATE_SERIAL.lower);
 
 begin 
 
-   iSS_SERIAL : entity work.eReg_SS generic map ( REG_SAVESTATE_SERIAL ) port map (clk, SSBUS_Din, SSBUS_Adr, SSBUS_wren, SSBUS_rst, SSBUS_Dout, SS_SERIAL_BACK, SS_SERIAL); 
+   iSS_SERIAL : entity work.eReg_SS generic map ( REG_SAVESTATE_SERIAL ) port map (clk, SSBUS_Din, SSBUS_Adr, SSBUS_wren, SSBUS_rst, SSBUS_Dout, SS_SERIAL_BACK, SS_SERIAL);
 
+   iReg_SERCTL  : entity work.eReg generic map ( SERCTL ) port map (clk, RegBus_Din, RegBus_Adr, RegBus_wren, RegBus_rst, reg_wired_or(0), Reg_SERCTL_BACK, Reg_SERCTL, Reg_SERCTL_written);
+   iReg_SERDAT  : entity work.eReg generic map ( SERDAT ) port map (clk, RegBus_Din, RegBus_Adr, RegBus_wren, RegBus_rst, reg_wired_or(1), Reg_SERDAT_BACK, Reg_SERDAT, Reg_SERDAT_written);
 
-   iReg_SERCTL  : entity work.eReg generic map ( SERCTL ) port map (clk, RegBus_Din, RegBus_Adr, RegBus_wren, RegBus_rst, reg_wired_or(0), Reg_SERCTL_BACK , Reg_SERCTL, Reg_SERCTL_written );  
-   iReg_SERDAT  : entity work.eReg generic map ( SERDAT ) port map (clk, RegBus_Din, RegBus_Adr, RegBus_wren, RegBus_rst, reg_wired_or(1), Reg_SERDAT      , Reg_SERDAT, Reg_SERDAT_written );  
-  
    process (reg_wired_or)
       variable wired_or : std_logic_vector(7 downto 0);
    begin
@@ -96,29 +136,34 @@ begin
    end process;
    
    TXINTEN  <= Reg_SERCTL(7);
-   RXINTEN  <= Reg_SERCTL(6);      
-   --PAREN    <= Reg_SERCTL(4); -- unused
-   --RESETERR <= Reg_SERCTL(3); -- unused
-   --TXOPEN   <= Reg_SERCTL(2); -- unused
+   RXINTEN  <= Reg_SERCTL(6);
+   PAREN    <= Reg_SERCTL(4);
+   TXOPEN   <= Reg_SERCTL(2);
    TXBRK    <= Reg_SERCTL(1);
-   --PAREVEN  <= Reg_SERCTL(0); -- unused
-   
-   
-   irq_serial <= '1' when ((uartTXCount < 0 and TXINTEN = '1') or (RXRDY = '1' and RXINTEN = '1')) else '0';
-   
-   Reg_SERCTL_BACK(7) <= TXRDY;  
-   Reg_SERCTL_BACK(6) <= RXRDY;  
+   PAREVEN  <= Reg_SERCTL(0);
+
+   TXRDY    <= not tx_hold_full;
+   TXEMPTY  <= '1' when (tx_hold_full = '0' and tx_busy = '0' and TXBRK = '0') else '0';
+   comm_tx  <= tx_line;
+
+   irq_serial <= '1' when ((TXRDY = '1' and TXINTEN = '1') or (RXRDY = '1' and RXINTEN = '1')) else '0';
+
+   Reg_SERCTL_BACK(7) <= TXRDY;
+   Reg_SERCTL_BACK(6) <= RXRDY;
    Reg_SERCTL_BACK(5) <= TXEMPTY;
-   Reg_SERCTL_BACK(4) <= PARERR; 
+   Reg_SERCTL_BACK(4) <= PARERR;
    Reg_SERCTL_BACK(3) <= OVERRUN;
    Reg_SERCTL_BACK(2) <= FRAMERR;
-   Reg_SERCTL_BACK(1) <= RXBRK;  
-   Reg_SERCTL_BACK(0) <= PARBIT; 
-   
-   SS_SERIAL_BACK( 7 downto  0) <= std_logic_vector(uartTXCount);
-   SS_SERIAL_BACK(15 downto  8) <= std_logic_vector(uartRXCount);
-   SS_SERIAL_BACK(23 downto 16) <= std_logic_vector(uartRXBytes);
-   
+   Reg_SERCTL_BACK(1) <= RXBRK;
+   Reg_SERCTL_BACK(0) <= PARBIT;
+
+   Reg_SERDAT_BACK <= rx_data;
+
+   SS_SERIAL_BACK( 7 downto  0) <= tx_hold_data;
+   SS_SERIAL_BACK(15 downto  8) <= rx_data;
+   SS_SERIAL_BACK(19 downto 16) <= std_logic_vector(to_unsigned(tx_bit_count, 4));
+   SS_SERIAL_BACK(23 downto 20) <= std_logic_vector(to_unsigned(rx_bit_count, 4));
+
    SS_SERIAL_BACK(24) <= TXRDY;
    SS_SERIAL_BACK(25) <= RXRDY;
    SS_SERIAL_BACK(26) <= TXEMPTY;
@@ -129,103 +174,183 @@ begin
    SS_SERIAL_BACK(31) <= PARBIT;
 
    process (clk)
-      variable loopback   : std_logic;
-      variable newRXBytes : signed(7 downto 0);
+      variable serial_tick    : std_logic;
+      variable expected_parity: std_logic;
+      variable sample_period  : unsigned(rx_wait'range);
    begin
       if rising_edge(clk) then
 
+         serial_tick := serialNewTx and not serialNewTx_1;
+         serialNewTx_1 <= serialNewTx;
+
+         comm_rx_meta <= comm_rx;
+         comm_rx_sync <= comm_rx_meta;
+         comm_rx_last <= comm_rx_sync;
+
          if (reset = '1') then
-         
-            uartTXCount <= signed(SS_SERIAL( 7 downto  0)); -- to_signed(-1, 8);
-            uartRXCount <= signed(SS_SERIAL(15 downto  8)); -- to_signed(-1, 8);
-            uartRXBytes <= signed(SS_SERIAL(23 downto 16)); -- to_signed( 0, 8);
-            
-            TXRDY       <= SS_SERIAL(24); -- '1';
-            RXRDY       <= SS_SERIAL(25); -- '0';
-            TXEMPTY     <= SS_SERIAL(26); -- '1';
-            PARERR      <= SS_SERIAL(27); -- '0';
-            OVERRUN     <= SS_SERIAL(28); -- '0';
-            FRAMERR     <= SS_SERIAL(29); -- '0';
-            RXBRK       <= SS_SERIAL(30); -- '0';
-            PARBIT      <= SS_SERIAL(31); -- '0';
 
-         elsif (ce = '1') then
-         
-            loopback   := '0';
-            newRXBytes := uartRXBytes;
-         
-            -- newTX
-            if (serialNewTx = '1') then
-               if (uartTXCount = 0) then
-                  if (TXBRK = '1') then
-                     uartTXCount <= to_signed(11, 8);
-                     
-                     --loopback
-                     if (uartRXBytes < 32) then
-                        if (uartRXBytes = 0) then 
-                           uartRXCount <= to_signed(11, 8);
-                        end if;
-                        newRXBytes := newRXBytes + 1;
-                     end if;
+            tx_hold_data  <= SS_SERIAL( 7 downto  0);
+            rx_data       <= SS_SERIAL(15 downto  8);
+
+            tx_hold_full  <= not SS_SERIAL(24);
+            tx_shift_data <= (others => '1');
+            tx_busy       <= '0';
+            tx_bit_count  <= 0;
+            tx_parity_bit <= '1';
+            tx_line       <= '1';
+
+            RXRDY         <= SS_SERIAL(25);
+            PARERR        <= SS_SERIAL(27);
+            OVERRUN       <= SS_SERIAL(28);
+            FRAMERR       <= SS_SERIAL(29);
+            RXBRK         <= SS_SERIAL(30);
+            PARBIT        <= SS_SERIAL(31);
+
+            rx_shift_data <= (others => '0');
+            rx_busy       <= '0';
+            rx_bit_count  <= 0;
+            rx_wait       <= (others => '0');
+            rx_parity_bit <= '0';
+
+            baud_counter  <= (others => '0');
+            baud_period   <= to_unsigned(1024, 24);
+            break_count   <= 0;
+
+         else
+
+            if (baud_counter /= x"FFFFFF") then
+               baud_counter <= baud_counter + 1;
+            end if;
+
+            if (serial_tick = '1') then
+               if (baud_counter > 0) then
+                  baud_period <= baud_counter;
+               end if;
+               baud_counter <= (others => '0');
+
+               if (comm_rx_sync = '0') then
+                  if (break_count < 24) then
+                     break_count <= break_count + 1;
+                  end if;
+                  if (break_count >= 23) then
+                     RXBRK <= '1';
+                  end if;
+               else
+                  break_count <= 0;
+                  RXBRK <= '0';
+               end if;
+
+               if (TXBRK = '1') then
+                  tx_busy      <= '0';
+                  tx_bit_count <= 0;
+                  tx_line      <= '0';
+               elsif (tx_busy = '0') then
+                  if (tx_hold_full = '1') then
+                     tx_shift_data <= tx_hold_data;
+                     tx_parity_bit <= frame_parity(tx_hold_data, PAREN, PAREVEN);
+                     tx_hold_full  <= '0';
+                     tx_busy       <= '1';
+                     tx_bit_count  <= 0;
+                     tx_line       <= '0';
                   else
-                     uartTXCount <= to_signed(-1, 8);
+                     tx_line <= '1';
                   end if;
-               elsif (uartTXCount > 0) then
-                  uartTXCount <= uartTXCount - 1;
-               end if;
-            
-               if (uartRXCount = 0) then
-                  if (newRXBytes > 0) then
-                     newRXBytes := newRXBytes - 1;
-                     if (newRXBytes > 0) then
-                        uartRXCount <= to_signed(55, 8);
-                     else
-                        uartRXCount <= to_signed(-1, 8);
-                     end if;
-            
-                     if (RXRDY = '1') then 
-                        OVERRUN <= '1';
-                     end if;
-                     RXRDY <= '1';
+               else
+                  if (tx_bit_count < 10) then
+                     tx_bit_count <= tx_bit_count + 1;
+                     case tx_bit_count + 1 is
+                        when 1 => tx_line <= tx_shift_data(0);
+                        when 2 => tx_line <= tx_shift_data(1);
+                        when 3 => tx_line <= tx_shift_data(2);
+                        when 4 => tx_line <= tx_shift_data(3);
+                        when 5 => tx_line <= tx_shift_data(4);
+                        when 6 => tx_line <= tx_shift_data(5);
+                        when 7 => tx_line <= tx_shift_data(6);
+                        when 8 => tx_line <= tx_shift_data(7);
+                        when 9 => tx_line <= tx_parity_bit;
+                        when others => tx_line <= '1';
+                     end case;
+                  elsif (tx_hold_full = '1') then
+                     tx_shift_data <= tx_hold_data;
+                     tx_parity_bit <= frame_parity(tx_hold_data, PAREN, PAREVEN);
+                     tx_hold_full  <= '0';
+                     tx_bit_count  <= 0;
+                     tx_line       <= '0';
+                  else
+                     tx_busy      <= '0';
+                     tx_bit_count <= 0;
+                     tx_line      <= '1';
                   end if;
-               elsif (uartRXCount > 0) then
-                  uartRXCount <= uartRXCount - 1;
                end if;
-            end if;
-            uartRXBytes <= newRXBytes;
-            
-            -- writeCTL
-            if (Reg_SERCTL_written = '1') then
-               
-               if (Reg_SERCTL(1) = '1') then
-                  uartTXCount <= to_signed(11, 8);
-                  loopback    := '1';
-               end if;
-               
-               if (Reg_SERCTL(3) = '1') then
-                  FRAMERR <= '0';
-                  OVERRUN <= '0';
-               end if;
-               
-            end if;
-            
-            if (Reg_SERDAT_written = '1') then
-               uartTXCount <= to_signed(11, 8);
-               loopback    := '1';
-            end if;
-            
-            -- read
-            if (serdat_read = '1') then
-               RXRDY <= '0';
+            elsif (TXBRK = '1') then
+               tx_line <= '0';
+            elsif (tx_busy = '0') then
+               tx_line <= '1';
             end if;
 
-            --loopback
-            if (loopback = '1') then
-               if (uartRXBytes < 32) then
-                  if (uartRXBytes = 0) then 
-                     uartRXCount <= to_signed(11, 8);
+            if (rx_busy = '0') then
+               if (comm_rx_last = '1' and comm_rx_sync = '0') then
+                  sample_period := resize(baud_period, rx_wait'length);
+                  rx_busy       <= '1';
+                  rx_bit_count  <= 0;
+                  rx_wait       <= sample_period + shift_right(sample_period, 1);
+               end if;
+            else
+               if (rx_wait > 0) then
+                  rx_wait <= rx_wait - 1;
+               else
+                  sample_period := resize(baud_period, rx_wait'length);
+                  rx_wait <= sample_period - 1;
+
+                  if (rx_bit_count < 8) then
+                     rx_shift_data(rx_bit_count) <= comm_rx_sync;
+                     rx_bit_count <= rx_bit_count + 1;
+                  elsif (rx_bit_count = 8) then
+                     rx_parity_bit <= comm_rx_sync;
+                     rx_bit_count <= 9;
+                  else
+                     expected_parity := frame_parity(rx_shift_data, PAREN, PAREVEN);
+
+                     if (rx_parity_bit /= expected_parity) then
+                        PARERR <= '1';
+                     end if;
+
+                     if (comm_rx_sync /= '1') then
+                        FRAMERR <= '1';
+                     end if;
+
+                     if (RXRDY = '1') then
+                        OVERRUN <= '1';
+                     else
+                        rx_data <= rx_shift_data;
+                        PARBIT  <= rx_parity_bit;
+                        RXRDY   <= '1';
+                     end if;
+
+                     rx_busy      <= '0';
+                     rx_bit_count <= 0;
                   end if;
-                  uartRXBytes <= uartRXBytes + 1;
+               end if;
+            end if;
+
+            if (ce = '1') then
+
+               if (Reg_SERCTL_written = '1') then
+                  if (Reg_SERCTL(3) = '1') then
+                     PARERR  <= '0';
+                     OVERRUN <= '0';
+                     FRAMERR <= '0';
+                     RXBRK   <= '0';
+                  end if;
+               end if;
+
+               if (serdat_read = '1') then
+                  RXRDY <= '0';
+               end if;
+
+               if (Reg_SERDAT_written = '1') then
+                  tx_hold_data <= Reg_SERDAT;
+                  tx_hold_full <= '1';
                end if;
             end if;
 
